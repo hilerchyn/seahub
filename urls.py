@@ -78,6 +78,7 @@ urlpatterns = patterns('',
 
     ### Apps ###
     (r'^api/', include('api.urls')),
+    (r'^api2/', include('api2.urls')),
     (r'^avatar/', include('avatar.urls')),
     (r'^notification/', include('notifications.urls')),
     url(r'^sys/notificationadmin/', notification_list, name='notification_list'),
