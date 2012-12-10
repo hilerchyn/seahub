@@ -12,5 +12,8 @@ urlpatterns = patterns('',
 
     url(r'^repos/$', Repos.as_view()),
     url(r'^repos/(?P<repo_id>[-0-9a-f]{36})/$', Repo.as_view()),
-
+    url(r'^repos/(?P<repo_id>[-0-9a-f]{36})/dirents/$', RepoDirents.as_view()),
+    url(r'^repos/(?P<repo_id>[-0-9a-f]{36})/dirs/(?P<dir_id>[0-9a-f]{40})/$', RepoDirs.as_view()),
+    url(r'^repos/(?P<repo_id>[-0-9a-f]{36})/files/(?P<file_id>[0-9a-f]{40})/$', RepoFiles.as_view()),
+                       
 )
