@@ -13,7 +13,15 @@ urlpatterns = patterns('',
     url(r'^repos/$', Repos.as_view()),
     url(r'^repos/(?P<repo_id>[-0-9a-f]{36})/$', Repo.as_view()),
     url(r'^repos/(?P<repo_id>[-0-9a-f]{36})/dirents/$', RepoDirents.as_view()),
+    url(r'^repos/(?P<repo_id>[-0-9a-f]{36})/filepath/$', RepoFilepath.as_view()),
     url(r'^repos/(?P<repo_id>[-0-9a-f]{36})/dirs/(?P<dir_id>[0-9a-f]{40})/$', RepoDirs.as_view()),
     url(r'^repos/(?P<repo_id>[-0-9a-f]{36})/files/(?P<file_id>[0-9a-f]{40})/$', RepoFiles.as_view()),
-                       
+
+    url(r'^repos/(?P<repo_id>[-0-9-a-f]{36})/fileops/delete/$', OpDeleteView.as_view()),
+    url(r'^repos/(?P<repo_id>[-0-9-a-f]{36})/fileops/rename/$', OpRenameView.as_view()),
+    url(r'^repos/(?P<repo_id>[-0-9-a-f]{36})/fileops/move/$', OpMoveView.as_view()),
+    url(r'^repos/(?P<repo_id>[-0-9-a-f]{36})/fileops/mkdir/$', OpMkdirView.as_view()),
+    url(r'^repos/(?P<repo_id>[-0-9-a-f]{36})/fileops/upload/$', OpUploadView.as_view()),
+
+    url(r'^starredfiles/', StarredFileView.as_view()),
 )

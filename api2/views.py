@@ -1,5 +1,7 @@
 # encoding: utf-8
+import os
 import stat
+from urllib2 import unquote, quote
 import seahub.settings as settings
 
 from rest_framework import parsers
@@ -17,7 +19,8 @@ from serializers import AuthTokenSerializer
 from base.accounts import User
 from share.models import FileShare
 from seahub.views import access_to_repo, validate_owner
-from seahub.utils import gen_file_get_url, gen_token
+from seahub.utils import gen_file_get_url, gen_token, gen_file_upload_url, \
+    check_filename_with_rename, get_starred_files
 
 from pysearpc import SearpcError
 from seaserv import seafserv_rpc, seafserv_threaded_rpc, \
@@ -245,8 +248,14 @@ class Repo(APIView):
         return Response(repo_json)
 
     def post(self, request, repo_id, format=None):
-        # TODO
-        pass
+        resp = check_repo_access_permission(request, get_repo(repo_id))
+        if resp:
+            return resp
+        op = request.GET.get('op', 'setpassword')
+        if op == 'setpassword':
+            return Response("success")
+
+        return Response("unsupported operation")
 
 def check_repo_access_permission(request, repo):
     if not repo:
@@ -400,7 +409,63 @@ def get_repo_file(request, repo_id, file_id, file_name, op):
         path = request.GET.get('p', None)
         assert path, 'path must be passed in the url'
         return get_shared_link(request, repo_id, path)
+
+class RepoFilepath(APIView):
+    """
     
+    """
+    authentication_classes = (TokenAuthentication, )
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request, repo_id, format=None):
+        repo = get_repo(repo_id)
+        resp = check_repo_access_permission(request, repo)
+        if resp:
+            return resp
+
+        path = request.GET.get('p', None)
+        if not path:
+            return api_error('413')
+
+        file_id = None
+        try:
+            file_id = seafserv_threaded_rpc.get_file_by_path(repo_id,
+                                                             path.encode('utf-8'))
+        except SearpcError, e:
+            return api_error('412', "SearpcError:" + e.msg)
+
+        if not file_id:
+            return api_error('410')
+
+        file_name = request.GET.get('file_name', file_id)
+        op = request.GET.get('op', 'download')
+        return get_repo_file(request, repo_id, file_id, file_name, op)
+
+    def post(self, request, repo_id, format=None):
+        repo = get_repo(repo_id)
+        resp = check_repo_access_permission(request, repo)
+        if resp:
+            return resp
+
+        path = request.GET.get('p', None)
+        if not path:
+            return api_error('413', 'Path needed')
+
+        op = request.GET.get('op', 'sendsharelink')
+        if op == 'sendsharelink':
+            emails = request.POST.get('email', None)
+            if not emails:
+                return api_error('400', "Email required")
+            return send_share_link(request, path, emails)
+        elif op == 'star':
+            org_id = int(request.GET.get('org', '-1'))
+            star_file(request.user.username, repo_id, path, False, org_id=org_id)
+            return HttpResponse('success')
+        elif op == 'unstar':
+            unstar_file(request.user.username, repo_id, path)
+            return HttpResponse('success')
+        return api_error('415')
+
 class RepoFiles(APIView):
     """
     
@@ -416,4 +481,218 @@ class RepoFiles(APIView):
 
         file_name = request.GET.get('file_name', file_id)
         return get_repo_file(request, repo_id, file_id, file_name, 'download')
+
+def reloaddir_if_neccessary (request, repo_id, parent_dir):
+    reloaddir = False
+    s = request.GET.get('reloaddir', None)
+    if s and s.lower() == 'true':
+        reloaddir = True
+
+    if not reloaddir:
+        return Response('success')
+
+    current_commit = get_commits(repo_id, 0, 1)[0]
+    try:
+        dir_id = seafserv_threaded_rpc.get_dirid_by_path(current_commit.id,
+                                                         parent_dir.encode('utf-8'))
+    except SearpcError, e:
+        return api_error("411", "SearpcError:" + e.msg)
+
+    if not dir_id:
+        return api_error('410')
+    return get_dir_entrys_by_id(request, dir_id)
+    
+class OpDeleteView(APIView):
+    """
+    Delete a file.
+    """
+    authentication_classes = (TokenAuthentication, )
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request, repo_id, format=None):
+        resp = check_repo_access_permission(request, get_repo(repo_id))
+        if resp:
+            return resp
+
+        parent_dir = request.GET.get('p', '/')
+        file_names = request.POST.get("file_names")
+
+        if not parent_dir or not file_names:
+            return api_error('400')
+
+        names =  file_names.split(':')
+        names = map(lambda x: unquote(x).decode('utf-8'), names)
+
+        for file_name in names:
+            try:
+                seafserv_threaded_rpc.del_file(repo_id, parent_dir,
+                                               file_name, request.user.username)
+            except SearpcError,e:
+                return api_error('418', 'SearpcError:' + e.msg)
+
+        return reloaddir_if_neccessary (request, repo_id, parent_dir)
         
+class OpRenameView(APIView):
+    """
+    Rename a file.
+    """
+    authentication_classes = (TokenAuthentication, )
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request, repo_id, format=None):
+        resp = check_repo_access_permission(request, get_repo(repo_id))
+        if resp:
+            return resp
+
+        path = request.GET.get('p')
+        newname = request.POST.get("newname")
+        if not path or path[0] != '/' or not newname:
+            return api_error('400')
+
+        newname = unquote(newname).decode('utf-8')
+        if len(newname) > settings.MAX_UPLOAD_FILE_NAME_LEN:
+            return api_error('420', 'New name too long')
+
+        parent_dir = os.path.dirname(path)
+        oldname = os.path.basename(path)
+
+        if oldname == newname:
+            return api_error('420', 'The new name is the same to the old')
+
+        newname = check_filename_with_rename(repo_id, parent_dir, newname)
+
+        try:
+            seafserv_threaded_rpc.rename_file (repo_id, parent_dir, oldname,
+                                               newname, request.user.username)
+        except SearpcError,e:
+            return api_error('420', "SearpcError:" + e.msg)
+
+        return reloaddir_if_neccessary (request, repo_id, parent_dir)
+        
+class OpMoveView(APIView):
+    """
+    Move a file.
+    TODO: should be refactored and splited.
+    """
+    authentication_classes = (TokenAuthentication, )
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request, repo_id, format=None):
+        src_repo_id = request.POST.get('src_repo')
+        src_dir     = unquote(request.POST.get('src_dir')).decode('utf-8')
+        dst_repo_id = request.POST.get('dst_repo')
+        dst_dir     = unquote(request.POST.get('dst_dir')).decode('utf-8')
+        op          = request.POST.get('operation')
+        obj_names   = request.POST.get('obj_names')
+        print src_repo_id, dst_repo_id, src_dir, dst_dir, op, obj_names
+        if not (src_repo_id and src_dir  and dst_repo_id \
+                and dst_dir and op and obj_names):
+            return api_error('400')
+
+        if src_repo_id == dst_repo_id and src_dir == dst_dir:
+            return api_error('419', 'The src_dir is same to dst_dir')
+
+        names = obj_names.split(':')
+        names = map(lambda x: unquote(x).decode('utf-8'), names)
+
+        if dst_dir.startswith(src_dir):
+            for obj_name in names:
+                if dst_dir.startswith('/'.join([src_dir, obj_name])):
+                    return api_error('419', 'Can not move a dirctory to its subdir')
+
+        for obj_name in names:
+            new_obj_name = check_filename_with_rename(dst_repo_id, dst_dir, obj_name)
+
+            try:
+                if op == 'cp':
+                    seafserv_threaded_rpc.copy_file (src_repo_id, src_dir, obj_name,
+                                                     dst_repo_id, dst_dir, new_obj_name,
+                                                     request.user.username)
+                elif op == 'mv':
+                    seafserv_threaded_rpc.move_file (src_repo_id, src_dir, obj_name,
+                                                     dst_repo_id, dst_dir, new_obj_name,
+                                                     request.user.username)
+            except SearpcError, e:
+                return api_error('419', "SearpcError:" + e.msg)
+
+        return reloaddir_if_neccessary (request, dst_repo_id, dst_dir)
+
+class OpMkdirView(APIView):
+    """
+    Make a new directory.
+    """
+    authentication_classes = (TokenAuthentication, )
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request, repo_id, format=None):
+        resp = check_repo_access_permission(request, get_repo(repo_id))
+        if resp:
+            return resp
+
+        path = request.GET.get('p')
+        if not path or path[0] != '/':
+            return api_error('400')
+
+        parent_dir = os.path.dirname(path)
+        new_dir_name = os.path.basename(path)
+        new_dir_name = check_filename_with_rename(repo_id, parent_dir, new_dir_name)
+
+        try:
+            seafserv_threaded_rpc.post_dir(repo_id, parent_dir, new_dir_name,
+                                           request.user.username)
+        except SearpcError, e:
+            return api_error('421', e.msg)
+
+        return reloaddir_if_neccessary (request, repo_id, parent_dir)
+        
+class OpUploadView(APIView):
+    """
+    Upload a file.
+    """
+    authentication_classes = (TokenAuthentication, )
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request, repo_id, format=None):
+        repo = get_repo(repo_id)
+        if check_permission(repo_id, request.user.username) == 'rw':
+            token = seafserv_rpc.web_get_access_token(repo_id,
+                                                      'dummy',
+                                                      'upload',
+                                                      request.user.username)
+        else:
+            return api_error('403')
+
+        if request.cloud_mode and seafserv_threaded_rpc.check_quota(repo_id) < 0:
+            return api_error('413')
+
+        upload_url = gen_file_upload_url(token, 'upload')
+        return Response(upload_url)
+
+def append_starred_files(array, files):
+    for f in files:
+        sfile = {'org' : f.org_id,
+                 'repo' : f.repo.id,
+                 'path' : f.path,
+                 'mtime' : f.last_modified,
+                 'dir' : f.is_dir,
+                 'size' : f.size
+                 }
+        array.append(sfile)
+
+def api_starred_files(request):
+    starred_files = []
+    personal_files = get_starred_files(request.user.username, -1)
+    append_starred_files (starred_files, personal_files)
+    return Response(starred_files)
+    
+class StarredFileView(APIView):
+    """
+    Get starred files list.
+    """
+
+    authentication_classes = (TokenAuthentication, )
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request, format=None):
+        return api_starred_files(request)
+
